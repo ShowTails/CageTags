@@ -3,7 +3,7 @@
 </style></head><body><header><h1>ShowTails · Cage Card Generator</h1><small>Choose active rabbits · Customize cards · Print</small></header><main><div id="status" class="panel">Loading rabbits…</div><div id="controls" class="controls hidden">
 <section class="panel"><h2>1 · Select Active Rabbits</h2><div class="actions"><input id="search" type="search" placeholder="Search name, ear #, breed, variety" style="flex:1;min-width:230px"><button id="selectAll" class="alt">Select All Matching</button><button id="clear" class="alt">Clear Selection</button><span id="selectedCount" class="muted"></span></div><p class="muted">Enter an individual cage number beside each selected rabbit. Cage numbers are for this printout only.</p><div class="rabbit-list" id="rabbitList"></div></section>
 <section class="panel"><h2>2 · Choose Card Information</h2><div class="actions"><button id="defaults" class="alt">Default Fields</button><button id="allFields" class="alt">Select All Fields</button><button id="clearFields" class="alt">Clear Fields</button></div><div class="checks" id="fields" style="margin-top:12px"></div><div class="setting-row"><label class="toggle"><input type="checkbox" id="usePhoto" checked> Include rabbit photo</label><label class="toggle"><input type="checkbox" id="useQr" checked> Include QR code</label></div><p class="muted">Without photos, the cage number expands. Selecting too many fields may cause text to be clipped; check the preview before printing.</p></section>
-<section class="panel"><h2>3 · Preview and Print</h2><div class="actions"><button id="reload" class="alt">Refresh Data</button><button id="print">Print / Save PDF</button><span class="muted" id="cardCount"></span></div><p class="muted">Standard 3.5 × 2 inch cards · 10 per US Letter sheet. Print at 100% / Actual Size, with headers and footers off, and background graphics enabled.</p></section></div><h2 class="preview-title hidden" id="previewTitle">Print Preview</h2><div id="pages"></div></main>
+<section class="panel"><h2>3 · Preview and Print</h2><div id="qrDiagnostics" class="muted" style="margin-bottom:10px"></div><div class="actions"><button id="reload" class="alt">Refresh Data</button><button id="print">Print / Save PDF</button><span class="muted" id="cardCount"></span></div><p class="muted">Standard 3.5 × 2 inch cards · 10 per US Letter sheet. Print at 100% / Actual Size, with headers and footers off, and background graphics enabled.</p></section></div><h2 class="preview-title hidden" id="previewTitle">Print Preview</h2><div id="pages"></div></main>
 <script type="module">
 import * as glide from 'https://esm.sh/@glideapps/tables';
 // Direct Glide Tables API connection, matching the existing ShowTails Report Builder.
@@ -19,10 +19,37 @@ function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&l
 function unwrap(v){if(v==null)return '';if(typeof v!=='object')return v;for(const k of ['value','displayValue','text','content','formatted','url','uri'])if(v[k]!==undefined)return unwrap(v[k]);return '';}
 function cell(r,k,col){for(const obj of [r,r?.data,r?.values,r?.cells,r?.columns,r?._values,r?._data])if(obj)for(const key of [k,col])if(obj[key]!==undefined)return unwrap(obj[key]);if(typeof r?.get==='function')for(const key of [k,col]){try{const v=r.get(key);if(v!==undefined)return unwrap(v)}catch{}}return '';}
 function rid(r){return str(r?.$rowID||r?.rowID||r?.RowID)}
-function norm(r,defs){const o={rabbitId:rid(r)};for(const [k,v] of Object.entries(defs))o[k]=cell(r,k,v.name);return o}
+function norm(r,defs){const o={rabbitId:rid(r)};for(const [k,v] of Object.entries(defs)){
+  // Preserve original image values; the SDK can return image objects or arrays.
+  if(k==='newQr'||k==='photo'){
+    let raw;
+    for(const obj of [r,r?.data,r?.values,r?.cells,r?.columns,r?._values,r?._data]){
+      if(!obj)continue;
+      if(obj[k]!==undefined){raw=obj[k];break}
+      if(obj[v.name]!==undefined){raw=obj[v.name];break}
+    }
+    if(raw===undefined&&typeof r?.get==='function'){
+      for(const key of [k,v.name])try{const x=r.get(key);if(x!==undefined){raw=x;break}}catch{}
+    }
+    o[k]=raw===undefined?'':raw;
+  }else o[k]=cell(r,k,v.name);
+}return o}
 function rows(x){if(Array.isArray(x))return x;for(const k of ['rows','data','items'])if(Array.isArray(x?.[k]))return x[k];return []}
 function date(v){const m=str(v).match(/^(\d{4})-(\d{2})-(\d{2})/);return m?`${m[2]}/${m[3]}/${m[1]}`:str(v)}
-function imageUrl(v){const s=str(v);return /^https:\/\//i.test(s)?s:''}
+function imageUrl(v){
+  if(Array.isArray(v))return imageUrl(v[0]);
+  if(v&&typeof v==='object'){
+    for(const key of ['url','uri','src','value','image','imageUrl','displayValue'])
+      if(v[key])return imageUrl(v[key]);
+    return '';
+  }
+  const s=str(v);
+  if(/^https?:\/\//i.test(s)||/^data:image\//i.test(s))return s;
+  if(s.startsWith('[')||s.startsWith('{')){
+    try{return imageUrl(JSON.parse(s))}catch{}
+  }
+  return '';
+}
 let rabbits=[],chosen=new Set(),cages={},selected=new Set(defaults),user=null;
 function drawFields(){$('fields').innerHTML=Object.entries(labels).map(([k,v])=>`<label><input type="checkbox" class="fieldCheck" value="${k}" ${selected.has(k)?'checked':''}> ${esc(v)}</label>`).join('');document.querySelectorAll('.fieldCheck').forEach(el=>el.onchange=()=>{selected=new Set([...document.querySelectorAll('.fieldCheck:checked')].map(x=>x.value));renderCards()})}
 function filtered(){const q=lower($('search').value);return rabbits.filter(r=>!q||[r.rabbitName,r.earNumber,r.breed,r.selectedShowVariety,r.color].some(v=>lower(v).includes(q)))}
@@ -30,6 +57,12 @@ function drawList(){const arr=filtered();$('rabbitList').innerHTML=arr.length?ar
 function fieldHtml(r,k){const value=k==='dob'?date(r[k]):str(r[k]);if(!value)return '';return `<div class="field ${k==='rabbitName'?'name':''}"><b>${esc(labels[k])}:</b> ${esc(value)}</div>`}
 function cardHtml(r){const photo=$('usePhoto').checked,qr=$('useQr').checked,p=imageUrl(r.photo),q=imageUrl(r.newQr);return `<article class="card ${photo?'':'no-photo'} ${qr?'':'no-qr'}"><div class="left"><div class="cage">Cage #<strong>${esc(cages[r.rabbitId]||'—')}</strong></div>${photo?(p?`<img class="photo" src="${esc(p)}" alt="">`:'<div class="photo missing">No photo</div>'):''}</div><div class="detail">${[...selected].map(k=>fieldHtml(r,k)).join('')}</div>${qr?`<div class="qrbox">${q?`<img src="${esc(q)}" alt="Rabbit QR code">`:'<div class="missing">No QR code</div>'}<div class="brand">ShowTails</div></div>`:''}</article>`}
 function renderCards(){const arr=rabbits.filter(r=>chosen.has(r.rabbitId));$('cardCount').textContent=`${arr.length} cards · ${Math.ceil(arr.length/10)} sheet(s)`;$('previewTitle').classList.toggle('hidden',!arr.length);$('pages').innerHTML=arr.length?Array.from({length:Math.ceil(arr.length/10)},(_,i)=>`<div class="page">${arr.slice(i*10,i*10+10).map(cardHtml).join('')}</div>`).join(''):'<div class="panel muted">Select one or more active rabbits to preview cage cards.</div>'}
-async function load(){const userId=new URLSearchParams(location.search).get('userId')||new URLSearchParams(location.search).get('USERID');if(!userId){$('status').textContent='Missing userId URL parameter. Configure Glide Web Embed to pass the signed-in Users table Row ID as ?userId=...';return}try{$('status').classList.remove('hidden');$('status').textContent='Loading Users and active rabbits…';const ut=glide.table({token:TOKEN,app:APP,table:U,columns:UC});const users=rows(await ut.get()).map(r=>({...norm(r,UC),rowId:rid(r)}));user=users.find(r=>r.rowId===userId);if(!user)throw Error('User Row ID not found in Users table.');const email=lower(user.email);if(!email)throw Error('Matched user has no Email.');const rt=glide.table({token:TOKEN,app:APP,table:R,columns:RC});const response=await rt.get();if(response?.next||response?.nextPageToken||response?.hasMore)console.warn('Glide indicates pagination; additional pages may need loading.');rabbits=rows(response).map(r=>norm(r,RC)).filter(r=>(lower(r.ownerEmail)===email&&lower(r.status)==='active')||(lower(r.secondOwner)===email&&lower(r.secondOwnerStatus)==='active')).sort((a,b)=>str(a.earNumber).localeCompare(str(b.earNumber),undefined,{numeric:true,sensitivity:'base'}));chosen=new Set([...chosen].filter(id=>rabbits.some(r=>r.rabbitId===id)));$('status').classList.add('hidden');$('controls').classList.remove('hidden');drawList();renderCards()}catch(e){console.error(e);$('status').className='panel error';$('status').textContent='Unable to load: '+e.message}}
+async function load(){const userId=new URLSearchParams(location.search).get('userId')||new URLSearchParams(location.search).get('USERID');if(!userId){$('status').textContent='Missing userId URL parameter. Configure Glide Web Embed to pass the signed-in Users table Row ID as ?userId=...';return}try{$('status').classList.remove('hidden');$('status').textContent='Loading Users and active rabbits…';const ut=glide.table({token:TOKEN,app:APP,table:U,columns:UC});const users=rows(await ut.get()).map(r=>({...norm(r,UC),rowId:rid(r)}));user=users.find(r=>r.rowId===userId);if(!user)throw Error('User Row ID not found in Users table.');const email=lower(user.email);if(!email)throw Error('Matched user has no Email.');const rt=glide.table({token:TOKEN,app:APP,table:R,columns:RC});const response=await rt.get();if(response?.next||response?.nextPageToken||response?.hasMore)console.warn('Glide indicates pagination; additional pages may need loading.');const allRabbitRows=rows(response); const rawQrCount=allRabbitRows.filter(r=>imageUrl(norm(r,RC).newQr)).length; rabbits=allRabbitRows.map(r=>norm(r,RC)).filter(r=>(lower(r.ownerEmail)===email&&lower(r.status)==='active')||(lower(r.secondOwner)===email&&lower(r.secondOwnerStatus)==='active')).sort((a,b)=>str(a.earNumber).localeCompare(str(b.earNumber),undefined,{numeric:true,sensitivity:'base'}));chosen=new Set([...chosen].filter(id=>rabbits.some(r=>r.rabbitId===id)));
+const validQr=rabbits.filter(r=>imageUrl(r.newQr)).length;
+$('qrDiagnostics').textContent=`QR data: ${validQr} of ${rabbits.length} active rabbits have a usable QR image URL (${rawQrCount} across all returned rabbits).`+
+(validQr===0?' Glide may not expose the newQr computed column through the Tables API. Check the browser console for diagnostic details.':'');
+console.info('ShowTails QR diagnostics', {activeRabbits:rabbits.length,validQr,rawQrCount,
+  sample:rabbits.slice(0,3).map(r=>({rabbit:r.rabbitName,qrValue:r.newQr,qrType:typeof r.newQr}))});
+$('status').classList.add('hidden');$('controls').classList.remove('hidden');drawList();renderCards()}catch(e){console.error(e);$('status').className='panel error';$('status').textContent='Unable to load: '+e.message}}
 $('search').oninput=drawList;$('selectAll').onclick=()=>{filtered().forEach(r=>chosen.add(r.rabbitId));drawList();renderCards()};$('clear').onclick=()=>{chosen.clear();drawList();renderCards()};$('defaults').onclick=()=>{selected=new Set(defaults);drawFields();renderCards()};$('allFields').onclick=()=>{selected=new Set(Object.keys(labels));drawFields();renderCards()};$('clearFields').onclick=()=>{selected.clear();drawFields();renderCards()};$('usePhoto').onchange=renderCards;$('useQr').onchange=renderCards;$('reload').onclick=load;$('print').onclick=()=>{if(!chosen.size){alert('Select at least one rabbit.');return}window.print()};drawFields();load();
 </script></body></html>
